@@ -88,7 +88,38 @@ struct AlignedLine {
 	std::wstring leftText;
 	std::wstring rightText;
 	LineType type;
+	// Character-level diff ranges for CHANGED lines (positions of differences)
+	std::vector<std::pair<int,int>> leftDiffRanges;  // [start,end) pairs
+	std::vector<std::pair<int,int>> rightDiffRanges;
 };
+
+// Simple character-level diff: find differing ranges between two strings
+static void ComputeCharDiff(const std::wstring& a, const std::wstring& b,
+	std::vector<std::pair<int,int>>& aDiffs, std::vector<std::pair<int,int>>& bDiffs)
+{
+	// Use word-level granularity: split into tokens, diff tokens, map back to char positions
+	// For simplicity, use character-level Myers diff on the two strings
+	std::vector<wchar_t> va(a.begin(), a.end());
+	std::vector<wchar_t> vb(b.begin(), b.end());
+
+	DiffCalc<wchar_t> dc(va, vb);
+	auto result = dc(false, false, false);
+
+	int posA = 0, posB = 0;
+	for (size_t i = 0; i < result.size(); ++i) {
+		auto& d = result[i];
+		if (d.type == diff_type::DIFF_MATCH) {
+			posA += (int)d.len;
+			posB += (int)d.len;
+		} else if (d.type == diff_type::DIFF_IN_1) {
+			aDiffs.push_back({posA, posA + (int)d.len});
+			posA += (int)d.len;
+		} else if (d.type == diff_type::DIFF_IN_2) {
+			bDiffs.push_back({posB, posB + (int)d.len});
+			posB += (int)d.len;
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Run ComparePlus diff engine and build aligned lines
@@ -122,7 +153,12 @@ static std::vector<AlignedLine> RunDiffAndAlign(
 
 				// Pair up changed lines
 				for (intptr_t j = 0; j < common; ++j) {
-					aligned.push_back({A[d.off + j], B[d2.off + j], LineType::CHANGED});
+					AlignedLine al;
+					al.leftText = A[d.off + j];
+					al.rightText = B[d2.off + j];
+					al.type = LineType::CHANGED;
+					ComputeCharDiff(al.leftText, al.rightText, al.leftDiffRanges, al.rightDiffRanges);
+					aligned.push_back(std::move(al));
 				}
 				// Remaining deletions
 				for (intptr_t j = common; j < d.len; ++j) {
@@ -367,6 +403,7 @@ HANDLE WINAPI OpenW(const OpenInfo *Info)
 
 intptr_t WINAPI ProcessEditorEventW(const ProcessEditorEventInfo *Info)
 {
+	try {
 	if (!g_session.active) return 0;
 
 	if (Info->Event == EE_READ) {
@@ -449,6 +486,41 @@ intptr_t WINAPI ProcessEditorEventW(const ProcessEditorEventInfo *Info)
 				ecR.Color.BackgroundColor = bgR;
 				ecR.Owner = EditorColorGuid;
 				PsInfo.EditorControl(-1, ECTL_ADDCOLOR, 0, &ecR);
+
+				// Character-level highlighting for CHANGED lines
+				if (al.type == LineType::CHANGED) {
+					EditorColor ecH = {};
+					ecH.StructSize = sizeof(EditorColor);
+					ecH.StringNumber = i;
+					ecH.ColorItem = 0;
+					ecH.Priority = 0xFFFFFFFFU;
+					ecH.Flags = 0;
+					ecH.Color.Flags = FCF_FG_INDEX | FCF_BG_INDEX;
+					ecH.Owner = EditorColorGuid;
+
+					// Highlight changed chars on left side (white on red)
+					ecH.Color.ForegroundColor = MAKE_OPAQUE(0x0F);
+					ecH.Color.BackgroundColor = MAKE_OPAQUE(0x04);
+					for (auto& r : al.leftDiffRanges) {
+						ecH.StartPos = r.first;       // offset within left text
+						ecH.EndPos = r.second - 1;
+						if (ecH.StartPos < hw && ecH.EndPos >= 0) {
+							if (ecH.EndPos >= hw) ecH.EndPos = hw - 1;
+							PsInfo.EditorControl(-1, ECTL_ADDCOLOR, 0, &ecH);
+						}
+					}
+
+					// Highlight changed chars on right side (white on green)
+					ecH.Color.ForegroundColor = MAKE_OPAQUE(0x0F);
+					ecH.Color.BackgroundColor = MAKE_OPAQUE(0x02);
+					for (auto& r : al.rightDiffRanges) {
+						ecH.StartPos = hw + 1 + r.first;  // offset into right half
+						ecH.EndPos = hw + 1 + r.second - 1;
+						if (ecH.EndPos <= 2 * hw) {
+							PsInfo.EditorControl(-1, ECTL_ADDCOLOR, 0, &ecH);
+						}
+					}
+				}
 			}
 		}
 	}
@@ -461,5 +533,8 @@ intptr_t WINAPI ProcessEditorEventW(const ProcessEditorEventInfo *Info)
 		}
 	}
 
+	} catch (...) {
+		g_session.active = false;
+	}
 	return 0;
 }
