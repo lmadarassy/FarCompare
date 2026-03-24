@@ -122,65 +122,134 @@ static void ComputeCharDiff(const std::wstring& a, const std::wstring& b,
 }
 
 // ---------------------------------------------------------------------------
+// Line wrapper for diff - compares by normalized content (ignoring timestamps)
+// ---------------------------------------------------------------------------
+static uint64_t HashString(const std::wstring& s)
+{
+	uint64_t h = 0x84222325ULL;
+	for (wchar_t c : s)
+		h = h * 31 + c;
+	return h;
+}
+
+// Normalize a line: strip leading [timestamp] pattern like [HH:MM:SS.mmm]
+static std::wstring NormalizeLine(const std::wstring& s)
+{
+	if (s.size() > 2 && s[0] == L'[') {
+		// Find closing bracket
+		auto pos = s.find(L']');
+		if (pos != std::wstring::npos && pos < 30) {
+			// Check if content between brackets looks like a timestamp (contains digits and colons/dots)
+			bool looksLikeTimestamp = false;
+			for (size_t i = 1; i < pos; ++i) {
+				if (s[i] >= L'0' && s[i] <= L'9') { looksLikeTimestamp = true; break; }
+			}
+			if (looksLikeTimestamp) {
+				// Skip past the bracket and any trailing space
+				size_t start = pos + 1;
+				while (start < s.size() && s[start] == L' ') ++start;
+				return s.substr(start);
+			}
+		}
+	}
+	return s;
+}
+
+struct Line {
+	int index;          // original line index
+	uint64_t hash;      // hash of normalized content
+	const std::wstring* original; // pointer to original text
+
+	bool operator==(const Line& rhs) const { return hash == rhs.hash; }
+	bool operator!=(const Line& rhs) const { return hash != rhs.hash; }
+};
+
+static std::vector<Line> MakeLines(const std::vector<std::wstring>& strings)
+{
+	std::vector<Line> lines;
+	lines.reserve(strings.size());
+	for (int i = 0; i < (int)strings.size(); ++i) {
+		Line l;
+		l.index = i;
+		l.hash = HashString(NormalizeLine(strings[i]));
+		l.original = &strings[i];
+		lines.push_back(l);
+	}
+	return lines;
+}
+
+// ---------------------------------------------------------------------------
 // Run ComparePlus diff engine and build aligned lines
 // ---------------------------------------------------------------------------
 static std::vector<AlignedLine> RunDiffAndAlign(
 	const std::vector<std::wstring>& A,
 	const std::vector<std::wstring>& B)
 {
-	// Use ComparePlus DiffCalc with wstring elements
-	DiffCalc<std::wstring> dc(A, B);
-	auto result = dc(true, true, true); // doSwapCheck, doDiffsCombine, doBoundaryShift
+	auto linesA = MakeLines(A);
+	auto linesB = MakeLines(B);
 
-	// Convert diff_results to aligned lines
-	// diff_results contains entries of type DIFF_MATCH, DIFF_IN_1, DIFF_IN_2
-	// DIFF_IN_1 followed by DIFF_IN_2 = changed block
+	DiffCalc<Line> dc(linesA, linesB);
+	auto result = dc(true, true, true);
+
 	std::vector<AlignedLine> aligned;
+
+	// Track position in B separately since DIFF_MATCH.off indexes into A
+	intptr_t posB = 0;
 
 	for (size_t i = 0; i < result.size(); ++i) {
 		auto& d = result[i];
 
 		if (d.type == diff_type::DIFF_MATCH) {
 			for (intptr_t j = 0; j < d.len; ++j) {
-				aligned.push_back({A[d.off + j], B[d.off + j], LineType::MATCH});
+				intptr_t idxA = d.off + j;
+				intptr_t idxB = posB + j;
+				if (idxA < (intptr_t)linesA.size() && idxB < (intptr_t)linesB.size()) {
+					if (*linesA[idxA].original == *linesB[idxB].original) {
+						aligned.push_back({*linesA[idxA].original, *linesB[idxB].original, LineType::MATCH});
+					} else {
+						AlignedLine al;
+						al.leftText = *linesA[idxA].original;
+						al.rightText = *linesB[idxB].original;
+						al.type = LineType::CHANGED;
+						ComputeCharDiff(al.leftText, al.rightText, al.leftDiffRanges, al.rightDiffRanges);
+						aligned.push_back(std::move(al));
+					}
+				}
 			}
+			posB += d.len;
 		}
 		else if (d.type == diff_type::DIFF_IN_1) {
-			// Check if next is DIFF_IN_2 -> changed block
 			if (i + 1 < result.size() && result[i+1].type == diff_type::DIFF_IN_2) {
 				auto& d2 = result[i+1];
 				intptr_t common = std::min(d.len, d2.len);
-
-				// Pair up changed lines
 				for (intptr_t j = 0; j < common; ++j) {
 					AlignedLine al;
-					al.leftText = A[d.off + j];
-					al.rightText = B[d2.off + j];
+					al.leftText = *linesA[d.off + j].original;
+					al.rightText = *linesB[d2.off + j].original;
 					al.type = LineType::CHANGED;
 					ComputeCharDiff(al.leftText, al.rightText, al.leftDiffRanges, al.rightDiffRanges);
 					aligned.push_back(std::move(al));
 				}
-				// Remaining deletions
 				for (intptr_t j = common; j < d.len; ++j) {
-					aligned.push_back({A[d.off + j], L"", LineType::DEL});
+					aligned.push_back({*linesA[d.off + j].original, L"", LineType::DEL});
 				}
-				// Remaining insertions
 				for (intptr_t j = common; j < d2.len; ++j) {
-					aligned.push_back({L"", B[d2.off + j], LineType::INS});
+					aligned.push_back({L"", *linesB[d2.off + j].original, LineType::INS});
 				}
-				++i; // skip DIFF_IN_2
+				posB = d2.off + d2.len;
+				++i;
 			} else {
-				// Pure deletion
 				for (intptr_t j = 0; j < d.len; ++j) {
-					aligned.push_back({A[d.off + j], L"", LineType::DEL});
+					aligned.push_back({*linesA[d.off + j].original, L"", LineType::DEL});
 				}
+				// posB unchanged - deletions don't advance B
 			}
 		}
 		else if (d.type == diff_type::DIFF_IN_2) {
-			// Pure insertion (no preceding DIFF_IN_1)
 			for (intptr_t j = 0; j < d.len; ++j) {
-				aligned.push_back({L"", B[d.off + j], LineType::INS});
+				aligned.push_back({L"", *linesB[d.off + j].original, LineType::INS});
 			}
+			posB = d.off + d.len;
 		}
 	}
 
