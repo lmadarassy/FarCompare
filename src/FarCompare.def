@@ -1,0 +1,7 @@
+LIBRARY FarCompare
+EXPORTS
+	GetGlobalInfoW
+	SetStartupInfoW
+	GetPluginInfoW
+	OpenW
+	ProcessEditorEventW

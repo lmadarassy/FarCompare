@@ -1,0 +1,6 @@
+[submodule "external/FarManager"]
+	path = external/FarManager
+	url = https://github.com/FarGroup/FarManager.git
+[submodule "external/comparePlus"]
+	path = external/comparePlus
+	url = https://github.com/pnedev/comparePlus.git

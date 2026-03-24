@@ -1,0 +1,8 @@
+#include "farversion.hpp"
+
+#define PLUGIN_BUILD 1
+#define PLUGIN_DESC L"File Compare Plugin for Far Manager"
+#define PLUGIN_NAME L"FarCompare"
+#define PLUGIN_FILENAME L"FarCompare.dll"
+#define PLUGIN_AUTHOR L"FarCompare Project"
+#define PLUGIN_VERSION MAKEFARVERSION(FARMANAGERVERSION_MAJOR,FARMANAGERVERSION_MINOR,FARMANAGERVERSION_REVISION,PLUGIN_BUILD,VS_RELEASE)

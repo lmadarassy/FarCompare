@@ -1,0 +1,64 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        shell: cmd
+        run: |
+          mkdir build
+          set SRC=%CD%\src
+          set SDK=%CD%\external\FarManager\plugins\common\unicode
+          set SDK2=%CD%\external\FarManager\plugins\common
+          set DIFF_ENGINE=%CD%\external\comparePlus\src\Engine
+          set CL_FLAGS=/W3 /O2 /EHsc /std:c++17 /DNDEBUG /D_WINDOWS /D_USRDLL /D_WINDLL /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /I"%SRC%" /I"%SDK%" /I"%SDK2%" /I"%DIFF_ENGINE%"
+          cl.exe %CL_FLAGS% /Fe"build\FarCompare.dll" "%SRC%\FarCompare.cpp" /Fo"build\\" /link /DLL /DEF:"%SRC%\FarCompare.def" /OUT:"build\FarCompare.dll"
+          copy "%SRC%\FarCompEng.lng" build\
+          copy "%SRC%\FarCompHun.lng" build\
+          copy macros\FarCompare_keys.lua build\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FarCompare-x64
+          path: |
+            build/FarCompare.dll
+            build/FarCompEng.lng
+            build/FarCompHun.lng
+            build/FarCompare_keys.lua
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FarCompare-x64
+          path: release
+
+      - name: Create zip
+        run: cd release && zip -r ../FarCompare-x64.zip .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: FarCompare-x64.zip
+          generate_release_notes: true
